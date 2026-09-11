@@ -8,7 +8,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Union
 
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -54,10 +54,16 @@ async def root() -> Dict[str, str]:
 
 @app.post("/api/process")
 async def process_request(
-    name: str = Form(...),
-    args: str = Form(...),
-    kwargs: str = Form(...)
+    request: Request
 ) -> Dict[str, Union[bool, str]]:
+    form = await request.form(
+        max_fields=10,
+        max_part_size=64 * 1024 * 1024,
+    )
+
+    name = form["name"]
+    args = form["args"]
+    kwargs = form["kwargs"]
     """处理POST请求，使用模型实例处理数据"""
     try:
         # 解码args和kwargs

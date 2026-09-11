@@ -1,6 +1,7 @@
 import gzip
 import json
 import os
+import traceback
 import warnings
 from copy import deepcopy
 
@@ -286,66 +287,68 @@ class Agent():
                             'bev': bev_fmm
                         }
                     )
-
-                    # visualize
-                    _stage = self.rs_list[not_done_index[i]].stage
-                    if stage_result == 'next turn' or \
-                        (stage_result == 'episode end' and stepk == self.max_len - 1):
-                        _stage -= 1
-                    if _stage == 0:
-                        _stage = 1
-                    if sg_result:
-                        annotated_frame = draw_panorama(
-                            panoramas[0],
-                            self.sg_list[not_done_index[i]].segment2d_results[-1]['xyxy'],
-                            self.sg_list[not_done_index[i]].segment2d_results[-1]['mask'],
-                            self.sg_list[not_done_index[i]].segment2d_results[-1]['caption'],
-                            self.sg_list[not_done_index[i]].segment2d_results[-1]['caption_conf'],
-                        )
-                    else:
-                        annotated_frame = cv2.cvtColor(panoramas[0], cv2.COLOR_RGB2BGR)
-                    other_masks = []
-                    for stage_t, value in rs.masks.items():
-                        if stage_t == _stage:
-                            for j in range(len(value['object_masks'])):
-                                if 'keys' in value:
-                                    key = value['keys'][j]
-                                    current_constraint = rs.constraints[stage_t][key[0]]
-                                    mask_name = current_constraint['nodes'][key[1]]
-                                    if mask_name in rs.navigation_tree.navigation_tree:
+                    if False:
+                        # visualize
+                        _stage = self.rs_list[not_done_index[i]].stage
+                        if stage_result == 'next turn' or \
+                            (stage_result == 'episode end' and stepk == self.max_len - 1):
+                            _stage -= 1
+                        if _stage == 0:
+                            _stage = 1
+                        if sg_result:
+                            annotated_frame = draw_panorama(
+                                panoramas[0],
+                                self.sg_list[not_done_index[i]].segment2d_results[-1]['xyxy'],
+                                self.sg_list[not_done_index[i]].segment2d_results[-1]['mask'],
+                                self.sg_list[not_done_index[i]].segment2d_results[-1]['caption'],
+                                self.sg_list[not_done_index[i]].segment2d_results[-1]['caption_conf'],
+                            )
+                        else:
+                            annotated_frame = cv2.cvtColor(panoramas[0], cv2.COLOR_RGB2BGR)
+                        other_masks = []
+                        for stage_t, value in rs.masks.items():
+                            if stage_t == _stage:
+                                for j in range(len(value['object_masks'])):
+                                    if 'keys' in value:
+                                        key = value['keys'][j]
+                                        current_constraint = rs.constraints[stage_t][key[0]]
+                                        mask_name = current_constraint['nodes'][key[1]]
+                                        if mask_name in rs.navigation_tree.navigation_tree:
+                                            other_masks = other_masks + [value['object_masks'][j]]
+                                    else:
                                         other_masks = other_masks + [value['object_masks'][j]]
-                                else:
-                                    other_masks = other_masks + [value['object_masks'][j]]
-                    if _stage in rs.masks:
-                        valid_mask = rs.masks[_stage]['nav_mask']
-                    else:
-                        valid_mask = None
-                    bev_for_vis = bev_fmm if self.dataset == 'rxr' else bev
-                    bev_img = draw_layers(
-                        bev_for_vis,
-                        bev_thin,
-                        valid_mask,
-                        other_masks,
-                        list(rs.navigation_tree.navigation_tree.nodes(data=True)),
-                        list(rs.navigation_tree.navigation_tree.edges()),
-                        scene_graph,
-                        act,
-                        next_point,
-                        rs.navigation_tree.stage_begin,
-                        rs.best_point,
-                        agent_location,
-                        observations[i]['compass'][0],
-                        self.thin_type,
-                    )
+                        if _stage in rs.masks:
+                            valid_mask = rs.masks[_stage]['nav_mask']
+                        else:
+                            valid_mask = None
+                        bev_for_vis = bev_fmm if self.dataset == 'rxr' else bev
+                        bev_img = draw_layers(
+                            bev_for_vis,
+                            bev_thin,
+                            valid_mask,
+                            other_masks,
+                            list(rs.navigation_tree.navigation_tree.nodes(data=True)),
+                            list(rs.navigation_tree.navigation_tree.edges()),
+                            scene_graph,
+                            act,
+                            next_point,
+                            rs.navigation_tree.stage_begin,
+                            rs.best_point,
+                            agent_location,
+                            observations[i]['compass'][0],
+                            self.thin_type,
+                        )
 
-                    curr_eps = self.envs.current_episodes()
-                    visualization_image = combine_image(observations[i], self.stat_eps, curr_eps[i].episode_id, _stage, bev_img, annotated_frame)
-                    self.visualization_image_dict[curr_eps[i].episode_id].append(visualization_image)
+                        curr_eps = self.envs.current_episodes()
+                        visualization_image = combine_image(observations[i], self.stat_eps, curr_eps[i].episode_id, _stage, bev_img, annotated_frame)
+                        self.visualization_image_dict[curr_eps[i].episode_id].append(visualization_image)
 
                 except KeyboardInterrupt:
                     print("KeyboardInterrupt received. Exiting...")
                     exit(1)
                 except Exception as e:
+                    import traceback
+                    traceback.print_exc()
                     action = {
                             'action': {
                                 'act': 0,
