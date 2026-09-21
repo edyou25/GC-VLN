@@ -512,11 +512,6 @@ class Region_Solver():
     
     def spatial_optimize(self, points, cluster_ids, min_spacing, device, stage):
         """Optimization of spatial distribution."""
-        if self.debug_enabled:
-            self.debug_candidates.append({
-                'stage': stage, 'points': points.detach().clone(),
-                'cluster_ids': cluster_ids.detach().clone(),
-            })
         # select the points according to the cluster id
         centroids = []
         unique_ids = torch.unique(cluster_ids)
@@ -538,8 +533,11 @@ class Region_Solver():
                 final_pts_new.append(pt)
                 self.final_pts[stage].append(pt)
         
-        return torch.stack(final_pts_new) \
+        selected = torch.stack(final_pts_new) \
             if final_pts_new else torch.empty((0,2), device=device)
+        if self.debug_enabled:
+            self.debug_candidates.append({'stage': stage, 'points': selected.detach().clone()})
+        return selected
     
     def get_point_next_stage(self, bev:torch.Tensor, scene_graph:nx.Graph, bev_wall, oc_map):
         '''if there are points can be matched in next stage

@@ -67,6 +67,7 @@ class EpisodeViewer:
         self.index = -1
         self.step_name = None
         self.view_index = 0
+        self.image_key = None
         self.playing = False
         self.inspectors = []
         self.map_markers = []
@@ -198,7 +199,7 @@ class EpisodeViewer:
                      f'{"grid positions" if is_spatial else "topology layout"}', fontsize=9)
 
     def draw_detections(self, step):
-        rgb = get(step, 'rgbd/panorama_rgb')
+        rgb = self.reader.panorama(self.index)
         if rgb is None:
             missing(self.detect_ax, 'Step perception panorama')
             return
@@ -246,7 +247,9 @@ class EpisodeViewer:
                 overlay = np.zeros((*valid.shape, 4))
                 overlay[valid.astype(bool)] = [0, 1, 0, .2]
                 ax.imshow(overlay, origin='upper')
-        candidates = step.get('planning/candidates')
+        candidates = step.get('planning/waypoints')
+        if candidates is None:
+            candidates = step.get('planning/candidates')  # legacy logs
         if candidates is not None:
             for entry in candidates.values():
                 points = entry.get('points')
@@ -258,7 +261,7 @@ class EpisodeViewer:
         if selected is not None and np.asarray(selected).size == 2:
             row, col = selected
             ax.plot(col, row, '*', color='red', markersize=13)
-        ax.set_title('FMM: green=valid; orange=candidates*; red=goal', fontsize=8)
+        ax.set_title('FMM: orange=waypoints; red=goal', fontsize=8)
 
     def draw_trajectory(self):
         ax = self.trajectory_ax
@@ -291,18 +294,20 @@ class EpisodeViewer:
             self.draw_graph(self.graph_ax, get(step, 'scene_graph'), 'Scene graph')
             self.draw_graph(self.nav_ax, get(step, 'planning/navigation_tree/navigation_tree'), 'Navigation tree')
         view = self.reader.views[self.view_index]
-        rgb, depth = self.reader.images(index, view)
-        show_image(self.rgb_ax, rgb, f'Current frame RGB — {view}')
-        if depth is not None:
-            depth = np.asarray(depth)
-            if depth.ndim == 3 and depth.shape[-1] == 1:
-                depth = depth[..., 0]
-            depth = np.ma.masked_where(~np.isfinite(depth) | (depth <= 0), depth)
-        depth_sensor = view.replace('rgb', 'depth', 1)
-        normalized = get(self.reader.file, f'episode/cameras/{depth_sensor}/NORMALIZE_DEPTH', False)
-        limit, unit = (1, 'normalized') if normalized else (self.depth_max, 'm')
-        show_image(self.depth_ax, depth, f'Current frame depth — {depth_sensor} [0–{limit:g} {unit}]',
-                   cmap='viridis', vmin=0, vmax=limit)
+        if self.image_key != (ref.step, view):
+            self.image_key = (ref.step, view)
+            rgb, depth = self.reader.images(index, view)
+            show_image(self.rgb_ax, rgb, f'Step {ref.step} RGB — {view} (fixed during motion)')
+            if depth is not None:
+                depth = np.asarray(depth)
+                if depth.ndim == 3 and depth.shape[-1] == 1:
+                    depth = depth[..., 0]
+                depth = np.ma.masked_where(~np.isfinite(depth) | (depth <= 0), depth)
+            depth_sensor = view.replace('rgb', 'depth', 1)
+            normalized = get(self.reader.file, f'episode/cameras/{depth_sensor}/NORMALIZE_DEPTH', False)
+            limit, unit = (1, 'normalized') if normalized else (self.depth_max, 'm')
+            show_image(self.depth_ax, depth, f'Step {ref.step} depth — {depth_sensor} [0–{limit:g} {unit}]',
+                       cmap='viridis', vmin=0, vmax=limit)
         episode_id = get(self.reader.file, 'episode/id', self.reader.file.attrs.get('episode_id', '?'))
         scene = get(self.reader.file, 'episode/scene', '?')
         self.heading.set_text(f'Episode {episode_id} | {Path(str(scene)).name} | '
@@ -327,8 +332,7 @@ class EpisodeViewer:
         self.info_ax.clear()
         self.info_ax.set_axis_off()
         self.info_ax.text(0, 1, '\n'.join(info), va='top', fontsize=8, transform=self.info_ax.transAxes)
-        gps = get(frame, 'rgbd/gps')
-        compass = get(frame, 'rgbd/compass')
+        gps, compass = self.reader.local_pose(index)
         size = get(self.reader.file, 'episode/config/POLICY_CONFIG/MAP/SIZE')
         resolution = get(self.reader.file, 'episode/config/POLICY_CONFIG/MAP/RESOLUTION')
         for marker, arrow in self.map_markers:
@@ -346,8 +350,8 @@ class EpisodeViewer:
         self.current_pose.set_data_3d([point[0]], [point[2]], [point[1]])
         error = get(step, 'error', get(step, 'motion/error', ''))
         error_line = str(error).strip().splitlines()[-1] if error else ''
-        self.status.set_text(f'{"ERROR: " + error_line if error else "Step context is fixed during motion; cyan = current agent on maps."}'
-                             '  *Dense candidates are sampled for display.')
+        self.status.set_text(f'{"ERROR: " + error_line if error else "RGB-D = Step observation; motion poses update per frame. Cyan = current agent."}'
+                             '  Dense waypoints are sampled for display.')
         self.fig.canvas.draw_idle()
 
     def inspect(self, event=None):

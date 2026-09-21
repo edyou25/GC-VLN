@@ -13,7 +13,7 @@ import h5py
 import networkx as nx
 import numpy as np
 
-from src.debug_log import EpisodeLog, MotionLog, write_value
+from src.debug_log import EpisodeLog, MotionLog, write_value, planning_snapshot
 
 
 def observation():
@@ -26,7 +26,7 @@ def observation():
 
 def worker_write(request):
     with MotionLog(request) as writer:
-        writer.record('action', observation(), None, {'position': np.zeros(3)}, action=1)
+        writer.record('action', None, {'position': np.zeros(3)}, action=1)
 
 
 def load_methods(path, class_name, names, namespace):
@@ -94,7 +94,7 @@ class DebugLogTests(unittest.TestCase):
     def test_exception_keeps_frames_and_closes_handle(self):
         with self.assertRaisesRegex(RuntimeError, 'simulation failed'):
             with MotionLog(self.log.motion_request(0)) as writer:
-                writer.record('start', observation(), None, None)
+                writer.record('start', None, None)
                 raise RuntimeError('simulation failed')
         self.log.finish('interrupted')
         with h5py.File(self.log.path) as file:
@@ -106,6 +106,31 @@ class DebugLogTests(unittest.TestCase):
         second = EpisodeLog.create(self.temp.name, '测试/42', {})
         self.assertNotEqual(second.path, self.log.path)
         self.assertEqual(len(list(Path(self.temp.name).glob('*.h5'))), 2)
+
+    def test_compact_frames_and_planning_exclude_large_intermediates(self):
+        large = np.ones((128, 128), dtype=np.float32)
+        pose = {'position': np.zeros(3), 'rotation_xyzw': np.array([0, 0, 0, 1]),
+                'heading': 0., 'sensors': {'depth': large}}
+        with MotionLog(self.log.motion_request(0)) as writer:
+            writer.record('action', pose, pose, action=1)
+        solver = SimpleNamespace(stage=1, debug_candidates=[{'stage': 1, 'points': np.ones((2, 2))}],
+            best_point=np.ones(2), navigation_mode='direction',
+            constraints={1: {'chair': {'constraint': [SimpleNamespace(
+                type='near', center=np.zeros(2), mask=large, device='cuda')]}}},
+            navigation_tree=SimpleNamespace(navigation_tree=nx.Graph(), waypoints_tree=nx.Graph(),
+                path=[], stage_begin={}, existed_point_mask=large, instruction_graph=nx.Graph()))
+        self.log.write('steps/000000', planning=planning_snapshot(solver, 1, 'continue', [1, 1]))
+        with h5py.File(self.log.path) as file:
+            self.assertEqual(file.attrs['schema_version'], 2)
+            frame = file['steps/000000/motion/frames/000000']
+            self.assertEqual(set(frame), {'action', 'before', 'after', 'stuck_time', 'teleport', 'reason'})
+            self.assertEqual(set(frame['after']), {'position', 'rotation_xyzw', 'heading'})
+            planning = file['steps/000000/planning']
+            self.assertNotIn('masks', planning)
+            self.assertNotIn('candidates', planning)
+            self.assertNotIn('existed_point_mask', planning['navigation_tree'])
+            constraint = planning['constraints/000000/value/chair/constraint/000000']
+            self.assertEqual(set(constraint), {'type', 'center'})
 
     def test_compression_options_and_empty_detections(self):
         for compression in ('none', 'gzip'):
@@ -155,7 +180,8 @@ class MotionIntegrationTests(unittest.TestCase):
         env.get_done = lambda obs: True
         env.get_info = lambda obs: {'spl': 1.0}
 
-    def test_stop_is_logged_with_rgbd_even_without_video(self):
+    def test_stop_records_motion_only_without_rendering(self):
+        self.env.get_observation_at = lambda *args: self.fail('logging must not render RGB-D')
         action = {'act': 0, 'next_point': None, 'current_pos': [0, 0],
                   'current_heading': 0, 'location': [0, 0]}
         result = self.env.step(action, None, None, debug_log=self.log.motion_request(0))
@@ -166,19 +192,17 @@ class MotionIntegrationTests(unittest.TestCase):
             frames = file['steps/000000/motion/frames']
             self.assertEqual(len(frames), 2)
             self.assertEqual(frames['000001/action'][()], 0)
-            np.testing.assert_array_equal(frames['000001/rgbd/depth'][:], observation()['depth'])
+            self.assertNotIn('rgbd', frames['000001'])
+            np.testing.assert_array_equal(file['steps/000000/rgbd/depth'][:], observation()['depth'])
 
     def test_every_low_level_action_teleport_and_stuck(self):
         self.env._env.sim._prev_sim_obs = {'collided': True}
-        def render(*args):
-            self.env._env.sim._prev_sim_obs = {'collided': False}
-            return observation()
-        self.env.get_observation_at = render
+        self.env.get_observation_at = lambda *args: self.fail('logging must not render RGB-D')
         with MotionLog(self.log.motion_request(0)) as writer:
             self.env._motion_log = writer
             for action in (1, 2, 3):
                 self.env.wrap_act(action, None)
-            self.env._record_motion('stuck', self.env._debug_pose(), stuck=True)
+            self.env._record_motion('stuck', self.env._debug_pose(), reason='blocked')
             self.env.teleport([1, 2, 3], None, reason='test recovery')
         self.env._motion_log = None
         self.assertEqual(self.executed, [1, 2, 3])
@@ -200,6 +224,7 @@ class PolicyIntegrationTests(unittest.TestCase):
     def test_episode_alignment_after_initial_and_mid_rollout_pause(self):
         with TemporaryDirectory() as directory:
             namespace = dict(np=np, os=os, json=json, traceback=traceback, EpisodeLog=EpisodeLog,
+                planning_snapshot=planning_snapshot,
                 get_instruction_graphs=lambda obs: ([1]*3, [nx.DiGraph() for _ in obs], [[]]*3, []),
                 get_pose_matrix=lambda obs: np.eye(4),
                 rgbs_to_panorama=lambda obs: [obs['rgb'], obs['depth']],

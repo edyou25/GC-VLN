@@ -32,7 +32,7 @@ def main():
     debug_group.add_argument('--debug-log', dest='debug_log', action='store_true', default=None,
                              help='Enable per-episode HDF5 debug logs (enabled by default)')
     debug_group.add_argument('--no-debug-log', dest='debug_log', action='store_false',
-                             help='Disable HDF5 debug logs and extra per-action RGB-D capture')
+                             help='Disable HDF5 debug logs')
     parser.add_argument('--debug-log-compression', choices=['lzf', 'gzip', 'none'], default=None,
                         help='Lossless compression for HDF5 arrays (default: lzf)')
     args = parser.parse_args()

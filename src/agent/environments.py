@@ -67,27 +67,14 @@ class GCVLNEnv(habitat.RLEnv):
                     'rotation_xyzw': np.array([*sensor.rotation.imag, sensor.rotation.real])}
         result = pose(state)
         result['heading'] = self.get_agent_info()['heading']
-        result['sensors'] = {name: pose(sensor) for name, sensor in state.sensor_states.items()}
         return result
 
-    def _record_motion(self, event, before, observations=None, **details):
+    def _record_motion(self, event, before, action=None, teleport=False, reason=''):
         if self._motion_log is None:
             return
         after = self._debug_pose()
-        if observations is None:
-            sim = self._env.sim
-            state = sim.get_agent_state()
-            # Habitat's observation query overwrites its collision cache.
-            # Extra logging renders must not alter the next planner/metric read.
-            has_cache = hasattr(sim, '_prev_sim_obs')
-            previous_observations = getattr(sim, '_prev_sim_obs', None)
-            try:
-                observations = self.get_observation_at(state.position, state.rotation)
-            finally:
-                if has_cache:
-                    sim._prev_sim_obs = previous_observations
-        self._motion_log.record(event, observations, before, after,
-                                stuck_time=self.stuck_time, **details)
+        self._motion_log.record(event, before, after, action=action,
+                                stuck_time=self.stuck_time, teleport=teleport, reason=reason)
 
     def get_reward_range(self) -> Tuple[float, float]:
         # We don't use a reward for DAgger, but the baseline_registry requires
@@ -134,8 +121,7 @@ class GCVLNEnv(habitat.RLEnv):
     def teleport(self, pos, rotation, reason='teleport'):
         before = self._debug_pose() if self._motion_log else None
         self._env.sim.set_agent_state(pos, rotation)
-        self._record_motion('teleport', before, reason=reason, teleport=True,
-                            target_position=pos)
+        self._record_motion('teleport', before, reason=reason, teleport=True)
 
     def get_observation_at(self,
         source_position: List[float],
@@ -374,7 +360,7 @@ class GCVLNEnv(habitat.RLEnv):
             self._env._task.measurements.update_measures(
                 episode=self._env.current_episode, action=act, task=self._env.task 
             )
-        self._record_motion('action', before, observations, action=int(act), teleport=False)
+        self._record_motion('action', before, action=int(act))
         return observations
 
     def get_plan_frame(self, vis_info):
@@ -440,10 +426,8 @@ class GCVLNEnv(habitat.RLEnv):
         with MotionLog(debug_log) as motion_log:
             self._motion_log = motion_log
             try:
-                # Actual worker config includes per-environment seed/sensor overrides.
-                if 'worker_config' not in motion_log.file['episode']:
-                    write_value(motion_log.file['episode'], 'worker_config', self.gcvln_config,
-                                debug_log['compression'])
+                # Keep actual sensor parameters once; do not duplicate the full config.
+                if 'cameras' not in motion_log.file['episode']:
                     write_value(motion_log.file['episode'], 'cameras', {
                         name: sensor.config
                         for name, sensor in self._env.sim.sensor_suite.sensors.items()
@@ -510,9 +494,8 @@ class GCVLNEnv(habitat.RLEnv):
                 dis = np.sum(np.abs(pre_pos - current_pos))
                 dis_t = np.sum(np.abs(np.array(next_point) - current_pos))
                 if self._motion_log and (dis <= 3.5 or result == 'incomplete'):
-                    self._record_motion('stuck', self._debug_pose(), stuck=True,
-                                        displacement_grid=dis, distance_to_target_grid=dis_t,
-                                        planner_result=result)
+                    self._record_motion('stuck', self._debug_pose(),
+                                        reason=f'{result}: displacement_grid={dis:g}, distance_to_target_grid={dis_t:g}')
                 if self.tele_flag:
                     if dis <= 3.5 and result != 'incomplete':
                         self.stuck_time += 1
@@ -562,7 +545,7 @@ class GCVLNEnv(habitat.RLEnv):
     
             before = self._debug_pose() if self._motion_log else None
             observations = self._env.step(act)
-            self._record_motion('action', before, observations, action=int(act), teleport=False)
+            self._record_motion('action', before, action=int(act))
             if self.video_option:
                 info = self.get_info(observations)
                 self.video_frames.append(

@@ -75,7 +75,12 @@ class EpisodeReader:
             self.frames = []
             self.positions = []
             self.views = set()
+            self._image_cache_key = None
+            self._image_cache = (None, None)
             for step_name, step in sorted(self.file['steps'].items()):
+                rgbd = step.get('rgbd')
+                if rgbd is not None:
+                    self.views.update(key for key in rgbd if key == 'rgb' or key.startswith('rgb_'))
                 frames = step.get('motion/frames')
                 entries = sorted(frames.items()) if frames is not None and len(frames) else [(None, step)]
                 for frame_name, frame in entries:
@@ -83,9 +88,6 @@ class EpisodeReader:
                         str(frame.attrs.get('event', 'planning')), frame_name or '-'))
                     position = read_value(frame.get('after/position'))
                     self.positions.append(position if position is not None else [np.nan]*3)
-                    rgbd = frame.get('rgbd')
-                    if rgbd is not None:
-                        self.views.update(key for key in rgbd if key == 'rgb' or key.startswith('rgb_'))
             self.positions = np.asarray(self.positions, dtype=float).reshape(-1, 3)
             self.views = sorted(self.views, key=lambda key: 0 if key == 'rgb' else int(key.split('_')[-1])) or ['rgb']
         except BaseException:
@@ -102,10 +104,61 @@ class EpisodeReader:
         return self.file[self.frames[index].path]
 
     def images(self, index, view='rgb'):
-        group = self.frame(index).get('rgbd')
+        """Step observation, cached while moving through its motion-only frames."""
+        key = (self.frames[index].step, view)
+        if key != self._image_cache_key:
+            group = self.step(index).get('rgbd')
+            self._image_cache = (None, None) if group is None else (
+                read_value(group.get(view)), read_value(group.get(view.replace('rgb', 'depth', 1))))
+            self._image_cache_key = key
+        return self._image_cache
+
+    def panorama(self, index):
+        """Reproduce rgbs_to_panorama + rotate_180 exactly from stored views."""
+        group = self.step(index).get('rgbd')
         if group is None:
+            return None
+        if 'panorama_rgb' in group:  # schema v1
+            return read_value(group['panorama_rgb'])
+        names = ['rgb'] + [f'rgb_{angle}' for angle in range(30, 360, 30)]
+        if any(name not in group for name in names):
+            return None
+        width = group['rgb'].shape[1]
+        strips = [group[name][:, int(width*.366):int(width*.634), :] for name in names]
+        panorama = np.concatenate(strips, axis=1)
+        split = panorama.shape[1]//2
+        return np.concatenate([panorama[:, split:], panorama[:, :split]], axis=1)
+
+    @staticmethod
+    def _rotation(quaternion):
+        x, y, z, w = np.asarray(quaternion, dtype=float)
+        norm = x*x + y*y + z*z + w*w
+        if norm == 0:
+            raise ValueError('Zero quaternion in pose log')
+        return np.eye(3) + 2/norm * np.array([
+            [-y*y-z*z, x*y-z*w, x*z+y*w],
+            [x*y+z*w, -x*x-z*z, y*z-x*w],
+            [x*z-y*w, y*z+x*w, -x*x-y*y]])
+
+    def local_pose(self, index):
+        """Recover Habitat GPS/compass from world pose; no per-frame sensors needed."""
+        frame = self.frame(index)
+        # Legacy frame observations and steps without motion are still readable.
+        if 'rgbd/gps' in frame:
+            return read_value(frame['rgbd/gps']), read_value(frame.get('rgbd/compass'))
+        position = read_value(frame.get('after/position'))
+        rotation = read_value(frame.get('after/rotation_xyzw'))
+        origin = read_value(self.file.get('episode/start_position'))
+        start_rotation = read_value(self.file.get('episode/start_rotation'))
+        if position is None or origin is None or start_rotation is None:
             return None, None
-        return read_value(group.get(view)), read_value(group.get(view.replace('rgb', 'depth', 1)))
+        start = self._rotation(start_rotation)
+        local = start.T @ (np.asarray(position) - origin)
+        compass = None
+        if rotation is not None:
+            forward = self._rotation(rotation).T @ start @ np.array([0, 0, -1])
+            compass = np.array([np.arctan2(forward[0], -forward[2])])
+        return np.array([-local[2], local[0]]), compass
 
     def ground_truth(self):
         for path in ('episode/gt/reference_path', 'episode/gt/trajectory/locations'):

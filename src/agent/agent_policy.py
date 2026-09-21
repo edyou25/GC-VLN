@@ -13,7 +13,7 @@ import tqdm
 
 from src.solver.instruction_graph import get_instruction_graphs
 from src.solver.region_solver import Region_Solver
-from src.debug_log import EpisodeLog
+from src.debug_log import EpisodeLog, planning_snapshot
 from habitat import logger
 from src.habitat_extensions import Simulator
 from src.agent.panorama_utils import rgbs_to_panorama, rotate_180
@@ -104,7 +104,6 @@ class Agent():
                 self.debug_save_dir, ep.episode_id, {
                     'id': ep.episode_id, 'scene': ep.scene_id,
                     'instruction': instruction,
-                    'dag_raw': instruction.get('DAG'),
                     'gt': {
                         'reference_path': getattr(ep, 'reference_path', None),
                         'goals': ep.goals,
@@ -114,7 +113,6 @@ class Agent():
                     'start_position': ep.start_position,
                     'start_rotation': ep.start_rotation,
                     'config': self.config,
-                    'config_yaml': self.config.dump(),
                     'experiment_id': self.experiment_id,
                     'environment_index': i,
                 }, self.debug_config.COMPRESSION,
@@ -269,7 +267,6 @@ class Agent():
                     panoramas, camera_matrix, pose_matrix = rotate_180(panoramas, camera_matrix, pose_matrix)
                     if episode_log:
                         episode_log.write(f'steps/{stepk:06d}/rgbd',
-                                          panorama_rgb=panoramas[0], panorama_depth=panoramas[1],
                                           camera_matrix=camera_matrix, pose_matrix=pose_matrix)
 
                     sg_result = self.sg_list[not_done_index[i]].get_scenegraph(
@@ -331,14 +328,8 @@ class Agent():
                     else:
                         act = 4
                     if episode_log:
-                        episode_log.write(f'steps/{stepk:06d}', planning={
-                            'stage_before': stage_before, 'stage': rs.stage,
-                            'stage_result': stage_result, 'constraints': rs.constraints,
-                            'masks': rs.masks, 'candidates': rs.debug_candidates,
-                            'final_points': rs.final_pts, 'selected_point': next_point,
-                            'best_point': rs.best_point, 'navigation_mode': rs.navigation_mode,
-                            'navigation_tree': vars(rs.navigation_tree),
-                        })
+                        episode_log.write(f'steps/{stepk:06d}', planning=planning_snapshot(
+                            rs, stage_before, stage_result, next_point))
                     # add action to the action list
                     env_actions.append(
                         {

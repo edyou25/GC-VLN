@@ -16,7 +16,7 @@ _C.UNI.VIDEO_DIR = 'data/logs/video/'
 _C.UNI.TELEFLAG = True
 _C.UNI.THIN_TYPE = 1
 
-# One HDF5 file per episode, including every low-level action's RGB-D.
+# One HDF5 file per episode: RGB-D per planning step, poses per action.
 _C.DEBUG_LOG = CN()
 _C.DEBUG_LOG.ENABLED = True
 _C.DEBUG_LOG.COMPRESSION = 'lzf'  # 'lzf', 'gzip', or 'none'

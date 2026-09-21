@@ -118,8 +118,9 @@ bash run_eval.sh rxr
 
 ## Code Structure
 
-HDF5 debug logging is enabled by default, with one file per episode and RGB-D
-snapshots for every low-level action. See [HDF5 debug logs](docs/hdf5_debug_logs.md)
+HDF5 debug logging is enabled by default, with one file per episode, all 12 RGB-D
+views per planning step, and compact action/pose records per motion frame.
+See [HDF5 debug logs](docs/hdf5_debug_logs.md)
 for the schema, reading examples, and configuration.
 Use `python scripts/view_hdf5_log.py <episode.h5>` to browse frames with a
 Matplotlib slider, playback controls, RGB-D views, maps, and navigation graphs.

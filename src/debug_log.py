@@ -95,6 +95,33 @@ def rgbd_snapshot(observation):
             or key.startswith(("rgb_", "depth_"))}
 
 
+def constraint_parameters(value):
+    """Keep constraint geometry/relations, excluding generated raster masks."""
+    if isinstance(value, Mapping):
+        return {key: constraint_parameters(item) for key, item in value.items()
+                if key not in ('mask', 'device')}
+    if isinstance(value, (list, tuple)):
+        return [constraint_parameters(item) for item in value]
+    if hasattr(value, '__dict__') and not hasattr(value, 'detach'):
+        return constraint_parameters(vars(value))
+    return value
+
+
+def planning_snapshot(solver, stage_before, stage_result, selected_point):
+    tree = solver.navigation_tree
+    return {
+        'stage_before': stage_before, 'stage': solver.stage,
+        'stage_result': stage_result,
+        'constraints': constraint_parameters(solver.constraints),
+        'waypoints': solver.debug_candidates,
+        'selected_point': selected_point, 'best_point': solver.best_point,
+        'navigation_mode': solver.navigation_mode,
+        'navigation_tree': {key: getattr(tree, key) for key in
+                            ('navigation_tree', 'waypoints_tree', 'path', 'stage_begin')
+                            if hasattr(tree, key)},
+    }
+
+
 class EpisodeLog:
     def __init__(self, path, compression="lzf"):
         self.path = str(path)
@@ -107,7 +134,7 @@ class EpisodeLog:
         name = quote(str(episode_id), safe="")[:100]
         log = cls(directory / f"episode_{name}_{uuid4().hex[:12]}.h5", compression)
         with h5py.File(log.path, "x") as file:
-            file.attrs.update(schema_version=1, status="running", episode_id=str(episode_id),
+            file.attrs.update(schema_version=2, status="running", episode_id=str(episode_id),
                               created_at=datetime.now(timezone.utc).isoformat())
             write_value(file, "episode", metadata, log.compression)
             file.create_group("steps")
@@ -155,12 +182,17 @@ class MotionLog:
             raise
         return self
 
-    def record(self, event, observation, before, after, **details):
+    def record(self, event, before, after, action=None, stuck_time=0, teleport=False, reason=''):
         frame = self.frames.create_group(f"{self.index:06d}")
         frame.attrs.update(event=event, frame_index=self.index, step_index=self.request["step"],
                            timestamp_ns=time.time_ns(),
                            planning_context=f"/steps/{self.request['step']:06d}")
-        values = dict(rgbd=rgbd_snapshot(observation), before=before, after=after, **details)
+        def pose_only(pose):
+            if pose is None:
+                return None
+            return {key: pose.get(key) for key in ('position', 'rotation_xyzw', 'heading')}
+        values = dict(action=action, before=pose_only(before), after=pose_only(after),
+                      stuck_time=stuck_time, teleport=teleport, reason=reason)
         for name, value in values.items():
             write_value(frame, name, value, self.request["compression"])
         self.index += 1

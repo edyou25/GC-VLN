@@ -21,16 +21,19 @@ outputs/logs/<dataset>/<split>/<experiment_id>/hdf5/
 
 ## 文件结构
 
+新文件采用 `schema_version=2`：完整 12 方向 RGB-D 只在 Step 保存一次，
+Frame 仅记录动作及前后位姿。查看器也兼容旧版文件，但不会自动改写旧日志。
+
 ```text
 episode/
-  id, scene, instruction, dag_raw, dag
+  id, scene, instruction, dag
   gt/{reference_path, goals, shortest_paths, trajectory}
   start_position, start_rotation
-  config, config_yaml, worker_config, cameras
+  config, cameras
   experiment_id, environment_index
 steps/000000/
   rgbd/{rgb, depth, rgb_30, depth_30, ..., gps, compass,
-        panorama_rgb, panorama_depth, camera_matrix, pose_matrix}
+        camera_matrix, pose_matrix}
   perception/
     detected
     detections/{boxes, labels, scores, masks, mask_scores}
@@ -38,18 +41,17 @@ steps/000000/
   mapping/{bev, wall, thin, fmm}
   scene_graph/{nodes, edges, attributes}
   planning/
-    stage_before, stage, stage_result, constraints, masks
-    candidates, final_points, selected_point, best_point, navigation_mode
-    navigation_tree/{navigation_tree, waypoints_tree, sequence_tree, path, ...}
+    stage_before, stage, stage_result, constraints, waypoints
+    selected_point, best_point, navigation_mode
+    navigation_tree/{navigation_tree, waypoints_tree, path, stage_begin}
   action/{act, next_point, current_pos, current_heading, location}
   motion/
     action_valid
     frames/000000/
-      rgbd/{rgb, depth, rgb_30, depth_30, ..., gps, compass}
-      before/{position, rotation_xyzw, heading, sensors}
-      after/{position, rotation_xyzw, heading, sensors}
-      action OR reason OR stuck
-      stuck_time, ...
+      action
+      before/{position, rotation_xyzw, heading}
+      after/{position, rotation_xyzw, heading}
+      stuck_time, teleport, reason
   outcome, done
   error                         # 出错时存在
 metrics                         # Episode 结束时存在
@@ -60,19 +62,23 @@ metrics                         # Episode 结束时存在
 - `steps` 是高层规划循环。每次更新 perception、mapping、scene graph 后保存，
   再保存选点结果并执行运动。规划异常会保存 traceback，尚未运行的模块标记为 `none`。
 - `motion/frames` 是该 Step 内按顺序记录的底层事件。每个前进、左右转和 STOP 都保存
-  动作执行后的全部 RGB-D 视角，以及执行前后 3D 位姿；没有开视频也会采集。
+  动作与执行前后 3D 位姿，不保存 RGB-D、GPS、Compass 或各个相机的世界位姿。
+  记录运动日志不调用渲染或额外获取观测。
   `event` 属性为 `start`、`action`、`teleport` 或 `stuck`。
-  `start` 没有执行动作，`teleport` 保存原因和目标，`stuck` 保存位移与规划结果。
+  `start` 没有执行动作；`teleport` 的目标位置见 `after/position`，原因见 `reason`；
+  `stuck` 的位移和规划结果摘要也写入 `reason`。非动作事件的 `action` 为 `none`。
   帧属性还包含 `step_index`、`frame_index`、`timestamp_ns` 和 `planning_context`。
 - 底层运动期间**不重新运行感知/建图/规划**；这些帧的模块上下文通过
-  `planning_context` 指向所属 Step。候选点包含参与聚类的原始点与 cluster IDs；
-  聚类后累计点在 `final_points`，已有可选路点及回溯路径保存在 navigation tree 中。
+  `planning_context` 指向所属 Step。`waypoints` 只保存本次聚类、间距筛选后的路点和 stage，
+  已有可选路点及回溯路径保存在 navigation tree 中。
+  约束保留关系与几何参数，不保存生成的 raster mask；不保存原始候选像素、cluster IDs、
+  规划中间 masks、existed_point_mask 或重复的指令图。
 - `rgbd/depth` 是 Habitat Depth Sensor 的原始输出，保留 shape、dtype、NaN/Inf 和数值，
   没有转成 PNG 或做日志专用归一化。当前 R2R/RxR 配置输出米制深度；
   Habitat 自身的 MIN_DEPTH / MAX_DEPTH 裁剪仍存在。
   `episode/cameras/<sensor_uuid>` 保存实际传感器的分辨率、HFOV、安装位置/角度和深度配置。
 - `before/after/position` 是 Habitat 世界坐标中的三维位置（米），四元数顺序为 XYZW，
-  heading 为弧度；`sensors` 保存每个相机的世界位置和旋转。
+  heading 为弧度。
   Step 内 `camera_matrix` / `pose_matrix` 是建图实际使用的全景内参和变换。
   BEV 点使用现有代码的 `[row, column]` 网格坐标，分辨率和原点见 Config。
 - GT 来自 Episode 的参考路径、目标、最短路径，以及已有 RxR GT 文件。
@@ -103,7 +109,7 @@ with h5py.File(path, 'r') as f:
 `000000`、`000001` 等子组保存，并通过 `type` 属性区分。普通字符串键字典直接用键名，
 非字符串键或含 `/` 的字典使用编号 entry 的 `key` / `value`，避免类型和路径冲突。
 `None` 是 `type=none` 的空组，空数组仍保留原始 shape / dtype。
-Constraint 等对象保存完整字段及 `python_class`，不使用 pickle。
+Constraint 保存关系、中心、半径、角度等参数，排除 `mask` 和 `device`，不使用 pickle。
 
 所有图保存完整节点 ID、边端点、图/节点/边属性；有向性和多重边信息在属性中。
 不会为可视化截断节点、边或候选点。
@@ -115,8 +121,10 @@ Constraint 等对象保存完整字段及 `python_class`，不使用 pickle。
 达到规划上限为 `max_steps`；捕获到中断/异常为 `interrupted`。
 motion 自己记录 `running` / `complete` / `error`。强制杀进程或断电不保证最后一帧完整。
 
-全量 RGB-D（包括 12 个视角）、mask、地图和完整图会增加渲染时间与磁盘占用。
-日志逐帧落盘，不在进程间传输整段视频。关闭日志后不额外采集底层动作帧。
+Step 保存完整 RGB-D（12 个视角）、检测 mask、四张地图和图结构。
+不重复保存 RGB/Depth 全景图；查看器按建图相同的裁剪、拼接及旋转规则重建 RGB 全景图。
+Config 只保存一次结构化版本，实际相机配置单独保存一次。
+Frame 仅追加少量动作和位姿数据，不再因日志额外渲染 RGB-D。
 
 CPU 测试不依赖 Habitat、GLIP 或 GSAM2 服务：
 
@@ -149,11 +157,13 @@ python scripts/view_hdf5_log.py /path/to/episode_123_xxx.h5
 | Home / End | 第一帧、最后一帧 |
 | I / Inspect HDF5 | 打开数据查看窗口，输入 HDF5 绝对路径并按 Enter |
 
-上方显示**当前运动帧**的 RGB 和 Depth；检测面板单独显示**所属 Step 开始时**的
-全景图、Boxes、Labels、Scores 和 Masks，避免把运动前的检测叠加到运动后的 RGB 上。
+上方始终显示**所属 Step 开始时**的 RGB 和 Depth，检测面板显示同一观测的
+全景图、Boxes、Labels、Scores 和 Masks。拖动同一 Step 内的 Frame 时，图像保持不变，
+只更新动作、位姿、地图上的当前位置与轨迹；切换 Step 或相机视角时才重新读取图像。
 其余面板展示四张地图、Scene Graph、Navigation Tree、指令 DAG 和世界坐标轨迹/GT。
-地图青色点和线表示当前 GPS 位置与朝向；FMM 上叠加绿色有效区域、橙色候选点和红色选中点。
-候选点非常密集时，每次聚类结果最多抽样 3000 个点用于显示，HDF5 原数据不变。
+地图青色点和线表示由当前世界位姿与 Episode 起始位姿计算出的当前位置与朝向；
+FMM 上叠加橙色路点和红色选中点。读取旧版日志时也支持原有的有效区域 overlay。
+路点非常密集时，每次聚类结果最多抽样 3000 个点用于显示，HDF5 原数据不变。
 
 Frame 索引从 0 开始，包含 `start`、`action`、`teleport`、`stuck` 事件。
 没有 motion 的异常 Step 也会作为一帧显示，未记录模块显示 `Not recorded`。
@@ -184,5 +194,5 @@ python scripts/view_hdf5_log.py episode.h5 --frame 120 --fps 10 --depth-max 8
 python scripts/view_hdf5_log.py episode.h5 --frame 120 --save outputs/frame_120.png
 ```
 
-图像按当前帧和相机视角读取；检测、地图和图结构只在切换 Step 时更新。
+图像按 Step 和相机视角缓存；检测、地图和图结构只在切换 Step 时更新。
 启动时只索引小型元数据与轨迹，不会把 Episode 的全部 RGB-D / Masks 读入内存。
