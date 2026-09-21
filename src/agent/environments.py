@@ -11,6 +11,7 @@ from habitat.sims.habitat_simulator.actions import HabitatSimActions
 from src.agent.utils import generate_video, navigator_video_frame, planner_video_frame
 from scipy.spatial.transform import Rotation as R
 from src.agent.navigation_planner import FMMPlanner
+from src.debug_log import MotionLog, write_value
 
 
 def quat_from_heading(heading, elevation=0):
@@ -56,6 +57,37 @@ class GCVLNEnv(habitat.RLEnv):
         self.observation_map = np.zeros(((self.map_size+1)//20, (self.map_size+1)//20), dtype=np.uint8)
         self.video_frames = []
         self.plan_frames = []
+        self._motion_log = None
+        self.stuck_time = 0
+
+    def _debug_pose(self):
+        state = self._env.sim.get_agent_state()
+        def pose(sensor):
+            return {'position': np.array(sensor.position, copy=True),
+                    'rotation_xyzw': np.array([*sensor.rotation.imag, sensor.rotation.real])}
+        result = pose(state)
+        result['heading'] = self.get_agent_info()['heading']
+        result['sensors'] = {name: pose(sensor) for name, sensor in state.sensor_states.items()}
+        return result
+
+    def _record_motion(self, event, before, observations=None, **details):
+        if self._motion_log is None:
+            return
+        after = self._debug_pose()
+        if observations is None:
+            sim = self._env.sim
+            state = sim.get_agent_state()
+            # Habitat's observation query overwrites its collision cache.
+            # Extra logging renders must not alter the next planner/metric read.
+            has_cache = hasattr(sim, '_prev_sim_obs')
+            previous_observations = getattr(sim, '_prev_sim_obs', None)
+            try:
+                observations = self.get_observation_at(state.position, state.rotation)
+            finally:
+                if has_cache:
+                    sim._prev_sim_obs = previous_observations
+        self._motion_log.record(event, observations, before, after,
+                                stuck_time=self.stuck_time, **details)
 
     def get_reward_range(self) -> Tuple[float, float]:
         # We don't use a reward for DAgger, but the baseline_registry requires
@@ -99,8 +131,11 @@ class GCVLNEnv(habitat.RLEnv):
         ori = np.array([*(agent_state.rotation.imag), agent_state.rotation.real])
         return (pos, ori)
     
-    def teleport(self, pos, rotation):
+    def teleport(self, pos, rotation, reason='teleport'):
+        before = self._debug_pose() if self._motion_log else None
         self._env.sim.set_agent_state(pos, rotation)
+        self._record_motion('teleport', before, reason=reason, teleport=True,
+                            target_position=pos)
 
     def get_observation_at(self,
         source_position: List[float],
@@ -322,6 +357,7 @@ class GCVLNEnv(habitat.RLEnv):
     
     def wrap_act(self, act, vis_info):
         ''' wrap action, get obs if video_option '''
+        before = self._debug_pose() if self._motion_log else None
         observations = None
         if self.video_option:
             observations = self._env.step(act)
@@ -338,6 +374,7 @@ class GCVLNEnv(habitat.RLEnv):
             self._env._task.measurements.update_measures(
                 episode=self._env.current_episode, action=act, task=self._env.task 
             )
+        self._record_motion('action', before, observations, action=int(act), teleport=False)
         return observations
 
     def get_plan_frame(self, vis_info):
@@ -358,7 +395,7 @@ class GCVLNEnv(habitat.RLEnv):
         pos = self.trans @ pos_t
         pos = pos.squeeze()
         pos = np.array([pos[1], self._env.sim.get_agent_state().position[1], pos[0]])
-        self.teleport(pos, self._env.sim.get_agent_state().rotation)
+        self.teleport(pos, self._env.sim.get_agent_state().rotation, reason='stuck_or_unreachable_target')
 
     def update_tele_matrix(self):
         self.stuck_time = 0
@@ -397,7 +434,28 @@ class GCVLNEnv(habitat.RLEnv):
         current_heading = observations['compass'][0]
         return current_pos, current_heading
     
-    def step(self, action, vis_info, bev, *args, **kwargs):
+    def step(self, action, vis_info, bev, debug_log=None, *args, **kwargs):
+        if debug_log is None:
+            return self._step_impl(action, vis_info, bev, *args, **kwargs)
+        with MotionLog(debug_log) as motion_log:
+            self._motion_log = motion_log
+            try:
+                # Actual worker config includes per-environment seed/sensor overrides.
+                if 'worker_config' not in motion_log.file['episode']:
+                    write_value(motion_log.file['episode'], 'worker_config', self.gcvln_config,
+                                debug_log['compression'])
+                    write_value(motion_log.file['episode'], 'cameras', {
+                        name: sensor.config
+                        for name, sensor in self._env.sim.sensor_suite.sensors.items()
+                    }, debug_log['compression'])
+                self._record_motion('start', self._debug_pose(), action=None, teleport=False)
+                result = self._step_impl(action, vis_info, bev, *args, **kwargs)
+                write_value(motion_log.group, 'action_valid', result[3]['action_valid'])
+                return result
+            finally:
+                self._motion_log = None
+
+    def _step_impl(self, action, vis_info, bev, *args, **kwargs):
         """
         Perform a one-step operation and process visual information 
         based on the type of operation
@@ -449,13 +507,17 @@ class GCVLNEnv(habitat.RLEnv):
                 for action_t in actions:
                     self.wrap_act(action_t, vis_info)
                 current_pos, current_heading = self.get_gps_location()
+                dis = np.sum(np.abs(pre_pos - current_pos))
+                dis_t = np.sum(np.abs(np.array(next_point) - current_pos))
+                if self._motion_log and (dis <= 3.5 or result == 'incomplete'):
+                    self._record_motion('stuck', self._debug_pose(), stuck=True,
+                                        displacement_grid=dis, distance_to_target_grid=dis_t,
+                                        planner_result=result)
                 if self.tele_flag:
-                    dis = np.sum(np.abs(pre_pos - current_pos))
-                    dis_t = np.sum(np.abs(np.array(next_point) - current_pos))
                     if dis <= 3.5 and result != 'incomplete':
                         self.stuck_time += 1
                     elif dis_t >= 150:
-                        self.teleport(pre_p, pre_r)
+                        self.teleport(pre_p, pre_r, reason='distance_to_target_rollback')
                         result = 'incomplete'
                         break
                     elif dis > 3.5:
@@ -472,8 +534,8 @@ class GCVLNEnv(habitat.RLEnv):
                         result = 'complete'
                         break
             current_pos, current_heading = self.get_gps_location()
-            if np.sum(np.abs(pre_pos - current_pos)) > 150 and dis_t <= 200:
-                self.teleport(pre_p, pre_r)
+            if self.tele_flag and np.sum(np.abs(pre_pos - current_pos)) > 150 and dis_t <= 200:
+                self.teleport(pre_p, pre_r, reason='excessive_displacement_rollback')
                 result = 'incomplete'
             action_valid = result
             if result == 'complete':
@@ -498,7 +560,9 @@ class GCVLNEnv(habitat.RLEnv):
             if self.video_option:
                 self.get_plan_frame(vis_info)
     
+            before = self._debug_pose() if self._motion_log else None
             observations = self._env.step(act)
+            self._record_motion('action', before, observations, action=int(act), teleport=False)
             if self.video_option:
                 info = self.get_info(observations)
                 self.video_frames.append(

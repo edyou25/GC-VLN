@@ -28,11 +28,18 @@ def main():
     parser.add_argument('--GSAM2_server_port', type=int, default=7003, help="GSAM2 server port")
     parser.add_argument('--dataset', type=str, choices=['r2r', 'rxr'], default='rxr', help="Dataset choice: r2r or rxr")
     parser.add_argument('--experiment_id', type=str, default='default_experiment', help="Experiment ID for logging")
+    debug_group = parser.add_mutually_exclusive_group()
+    debug_group.add_argument('--debug-log', dest='debug_log', action='store_true', default=None,
+                             help='Enable per-episode HDF5 debug logs (enabled by default)')
+    debug_group.add_argument('--no-debug-log', dest='debug_log', action='store_false',
+                             help='Disable HDF5 debug logs and extra per-action RGB-D capture')
+    parser.add_argument('--debug-log-compression', choices=['lzf', 'gzip', 'none'], default=None,
+                        help='Lossless compression for HDF5 arrays (default: lzf)')
     args = parser.parse_args()
     run_exp(**vars(args))
 
 
-def run_exp(exp_config: str, opts=None, local_rank=None, split_num=1, split_index=0, GSAM2_server_port=7003, dataset='rxr', experiment_id='default_experiment') -> None:
+def run_exp(exp_config: str, opts=None, local_rank=None, split_num=1, split_index=0, GSAM2_server_port=7003, dataset='rxr', experiment_id='default_experiment', debug_log=None, debug_log_compression=None) -> None:
     r"""Runs experiment given config_path and options
 
     Args:
@@ -51,6 +58,10 @@ def run_exp(exp_config: str, opts=None, local_rank=None, split_num=1, split_inde
     config.DATASET.DATASET_TYPE = dataset
     config.DATASET.EXPERIMENT_ID = experiment_id
     config.POLICY_CONFIG.GSAM2_SERVER_PORT = GSAM2_server_port
+    if debug_log is not None:
+        config.POLICY_CONFIG.DEBUG_LOG.ENABLED = debug_log
+    if debug_log_compression is not None:
+        config.POLICY_CONFIG.DEBUG_LOG.COMPRESSION = debug_log_compression
     config.freeze()
 
     # this parameter is in the get_config function

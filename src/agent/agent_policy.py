@@ -13,6 +13,7 @@ import tqdm
 
 from src.solver.instruction_graph import get_instruction_graphs
 from src.solver.region_solver import Region_Solver
+from src.debug_log import EpisodeLog
 from habitat import logger
 from src.habitat_extensions import Simulator
 from src.agent.panorama_utils import rgbs_to_panorama, rotate_180
@@ -61,6 +62,7 @@ class Agent():
         self.camera_matrix = get_camera_matrix(640, 480, 90)
 
         self.split = config.TASK_CONFIG.DATASET.SPLIT
+        self.gt_data = None
         if config.TASK_CONFIG.TASK.TASK_TYPE == 'rxr':
             self.gt_data = {}
             try:
@@ -81,6 +83,42 @@ class Agent():
         self.log_save_dir = os.path.join('./outputs/logs', config.DATASET.DATASET_TYPE, self.split, self.experiment_id)
         os.makedirs(self.visualization_save_dir, exist_ok=True)
         os.makedirs(self.log_save_dir, exist_ok=True)
+        self.debug_config = config.POLICY_CONFIG.DEBUG_LOG
+        self.episode_logs = {}
+        self.debug_save_dir = os.path.abspath(os.path.join(
+            self.log_save_dir, 'hdf5',
+            f'rank_{self.local_rank}_split_{config.DATASET.SPLIT_INDEX}'
+        ))
+        if self.debug_config.ENABLED:
+            logger.info(f'HDF5 episode logs: {self.debug_save_dir}')
+
+    def _start_episode_logs(self, observations):
+        self.episode_logs = {}
+        if not self.debug_config.ENABLED:
+            return
+        for i, ep in enumerate(self.envs.current_episodes()):
+            if ep.episode_id in self.stat_eps:
+                continue
+            instruction = observations[i].get('instruction', {})
+            self.episode_logs[i] = EpisodeLog.create(
+                self.debug_save_dir, ep.episode_id, {
+                    'id': ep.episode_id, 'scene': ep.scene_id,
+                    'instruction': instruction,
+                    'dag_raw': instruction.get('DAG'),
+                    'gt': {
+                        'reference_path': getattr(ep, 'reference_path', None),
+                        'goals': ep.goals,
+                        'shortest_paths': getattr(ep, 'shortest_paths', None),
+                        'trajectory': (self.gt_data or {}).get(str(ep.episode_id)),
+                    },
+                    'start_position': ep.start_position,
+                    'start_rotation': ep.start_rotation,
+                    'config': self.config,
+                    'config_yaml': self.config.dump(),
+                    'experiment_id': self.experiment_id,
+                    'environment_index': i,
+                }, self.debug_config.COMPRESSION,
+            )
 
     def _reset_policy(
         self,
@@ -138,6 +176,7 @@ class Agent():
         self.envs.resume_all()
         # reset the envs and get the observations
         observations = self.envs.reset()
+        self._start_episode_logs(observations)
         # get the instruction DAG and the region solver
         stage_num, instruction_graphs, objects_sum, wrong_dags = \
             get_instruction_graphs(observations)
@@ -149,6 +188,8 @@ class Agent():
             objects_sum,
             wrong_dags
         )
+        for i, episode_log in self.episode_logs.items():
+            episode_log.write('episode', dag=instruction_graphs[i], invalid_dag=i in wrong_dags)
         
         # suspend the evaluated environment
         env_to_pause = [i for i, ep in enumerate(self.envs.current_episodes()) 
@@ -156,7 +197,8 @@ class Agent():
         self.envs, observations = self._pause_envs(self.envs, env_to_pause, observations)
         if self.envs.num_envs == 0: return
 
-        not_done_index = list(range(self.envs.num_envs))
+        # Preserve policy/log indices when already evaluated environments pause.
+        not_done_index = [i for i in range(len(instruction_graphs)) if i not in env_to_pause]
 
         curr_eps = self.envs.current_episodes()
         self.visualization_image_dict = {curr_eps[i].episode_id: [] for i in range(self.envs.num_envs)}
@@ -165,6 +207,9 @@ class Agent():
         for stepk in range(self.max_len): 
             env_actions = []       
             for i in range(self.envs.num_envs):
+                episode_log = self.episode_logs.get(not_done_index[i])
+                if episode_log:
+                    episode_log.begin_step(stepk, observations[i])
                 try:
                     # if bev is wrong
                     if not_done_index[i] in wrong_dags:
@@ -208,20 +253,24 @@ class Agent():
                             pre_point = torch.from_numpy(pre_point).to(device=self.device, dtype=torch.int32)
                             object_detect = self.rs_list[not_done_index[i]].navigation_tree.object_detect[_s]
                             point_choose = self.rs_list[not_done_index[i]].navigation_tree.point_choose[_s]
-                            for i in range(len(object_detect) - 1, -1, -1):
-                                t = object_detect[i]
+                            for point_index in range(len(object_detect) - 1, -1, -1):
+                                t = object_detect[point_index]
                                 if torch.all(pre_point == t):
-                                    object_detect.pop(i)
-                            for i in range(len(point_choose) - 1, -1, -1):
-                                t = point_choose[i]
+                                    object_detect.pop(point_index)
+                            for point_index in range(len(point_choose) - 1, -1, -1):
+                                t = point_choose[point_index]
                                 if torch.all(pre_point == t):
-                                    point_choose.pop(i)
+                                    point_choose.pop(point_index)
                         
                     # update the bev map and scene graph
                     pose_matrix = get_pose_matrix(observations[i])
                     panoramas = rgbs_to_panorama(observations[i])
                     camera_matrix = self.camera_matrix
                     panoramas, camera_matrix, pose_matrix = rotate_180(panoramas, camera_matrix, pose_matrix)
+                    if episode_log:
+                        episode_log.write(f'steps/{stepk:06d}/rgbd',
+                                          panorama_rgb=panoramas[0], panorama_depth=panoramas[1],
+                                          camera_matrix=camera_matrix, pose_matrix=pose_matrix)
 
                     sg_result = self.sg_list[not_done_index[i]].get_scenegraph(
                         self.rs_list[not_done_index[i]].stage, 
@@ -237,6 +286,14 @@ class Agent():
                     bev_wall = self.sg_list[not_done_index[i]].map_draft.bev_wall
                     bev_thin = self.sg_list[not_done_index[i]].map_draft.bev_thin
                     scene_graph = self.sg_list[not_done_index[i]].map_draft.scene_graph
+                    if episode_log:
+                        sg = self.sg_list[not_done_index[i]]
+                        episode_log.write(f'steps/{stepk:06d}',
+                            perception={'detections': sg.last_detection,
+                                        'rooms': sg.last_room_detection, 'detected': sg_result},
+                            mapping={'bev': bev, 'wall': bev_wall, 'thin': bev_thin, 'fmm': bev_fmm},
+                            scene_graph=scene_graph)
+                    stage_before = self.rs_list[not_done_index[i]].stage
 
                     # the location of the agent will adapt to bev in the function
                     next_point, stage_result = self.rs_list[not_done_index[i]].get_next_point(
@@ -273,6 +330,15 @@ class Agent():
                             next_point = stage_begin[len(stage_begin)-1]
                     else:
                         act = 4
+                    if episode_log:
+                        episode_log.write(f'steps/{stepk:06d}', planning={
+                            'stage_before': stage_before, 'stage': rs.stage,
+                            'stage_result': stage_result, 'constraints': rs.constraints,
+                            'masks': rs.masks, 'candidates': rs.debug_candidates,
+                            'final_points': rs.final_pts, 'selected_point': next_point,
+                            'best_point': rs.best_point, 'navigation_mode': rs.navigation_mode,
+                            'navigation_tree': vars(rs.navigation_tree),
+                        })
                     # add action to the action list
                     env_actions.append(
                         {
@@ -349,6 +415,8 @@ class Agent():
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
+                    if episode_log:
+                        episode_log.write(f'steps/{stepk:06d}', error=traceback.format_exc())
                     action = {
                             'action': {
                                 'act': 0,
@@ -365,6 +433,12 @@ class Agent():
                     else:
                         env_actions.append(action)
 
+            # HDF5 handles are closed before handing each file to its worker.
+            for i, env_action in enumerate(env_actions):
+                episode_log = self.episode_logs.get(not_done_index[i])
+                if episode_log:
+                    episode_log.write(f'steps/{stepk:06d}', action=env_action['action'])
+                    env_action['debug_log'] = episode_log.motion_request(stepk)
             # execute the action in corresponding envs
             outputs = self.envs.step(env_actions)
             observations, _, dones, infos = [list(x) for x in zip(*outputs)]
@@ -375,6 +449,12 @@ class Agent():
                 ep_id = curr_eps[k].episode_id
                 metric = self.calculate_metric(infos[k])
                 self.stat_eps[ep_id] = metric
+                episode_log = self.episode_logs.get(not_done_index[k])
+                if episode_log:
+                    episode_log.write(f'steps/{stepk:06d}', outcome=infos[k], done=dones[k])
+                    if dones[k] or stepk == self.max_len - 1:
+                        episode_log.finish('complete' if dones[k] else 'max_steps', metrics=metric)
+                        del self.episode_logs[not_done_index[k]]
                 if not dones[k]:
                     continue
                 self.pbar.update()
@@ -411,9 +491,18 @@ class Agent():
             eps_to_eval = min(self.config.EVAL.EPISODE_COUNT, sum(self.envs.number_of_episodes))
         self.stat_eps = {}
         self.pbar = tqdm.tqdm(total=eps_to_eval)
-        while len(self.stat_eps) < eps_to_eval:
-            self.rollout()
-        self.envs.close()
+        try:
+            while len(self.stat_eps) < eps_to_eval:
+                self.rollout()
+        finally:
+            # Drain/close workers before reopening files they may still be writing.
+            error = traceback.format_exc()
+            try:
+                self.envs.close()
+            finally:
+                for episode_log in self.episode_logs.values():
+                    episode_log.finish('interrupted', error=error)
+                self.pbar.close()
 
         # log
         if self.world_size > 1:

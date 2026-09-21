@@ -16,6 +16,11 @@ _C.UNI.VIDEO_DIR = 'data/logs/video/'
 _C.UNI.TELEFLAG = True
 _C.UNI.THIN_TYPE = 1
 
+# One HDF5 file per episode, including every low-level action's RGB-D.
+_C.DEBUG_LOG = CN()
+_C.DEBUG_LOG.ENABLED = True
+_C.DEBUG_LOG.COMPRESSION = 'lzf'  # 'lzf', 'gzip', or 'none'
+
 path_to_sam2 = './Grounded-SAM-2'
 
 _C.SCENEGRAPH = CN()

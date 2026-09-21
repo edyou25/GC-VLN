@@ -22,3 +22,5 @@ prettytable
 ftfy
 inflect
 scikit-fmm
+h5py>=3.8,<4
+matplotlib>=3.5,<4

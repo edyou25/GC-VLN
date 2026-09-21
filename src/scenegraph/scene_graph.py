@@ -84,6 +84,8 @@ class SceneGraph(Mapping3d):
         '''get the object of the text list, return a list of the objects
         '''
         # get the segmentation and caption of a image, store in self.segment2d_results
+        self.last_detection = None
+        self.last_room_detection = None
         result = self.segment2d(image_rgb, depth_array, [stage, stage+1])
         masks = np.array([])
         if result:        
@@ -198,7 +200,17 @@ class SceneGraph(Mapping3d):
                         labels.append(room_list[i-1])
                 bbox = result.bbox.numpy()
                 self.glip_room = {'labels':labels, 'bbox':bbox}
+                self.last_room_detection = {
+                    'labels': labels, 'boxes': bbox,
+                    'scores': result.get_field('scores').numpy(),
+                }
 
+        self.last_detection = {
+            'boxes': xyxy.reshape(-1, 4), 'labels': captions,
+            'scores': captions_conf, 'mask_scores': masks_conf,
+            'masks': masks.astype(np.uint8) if masks.size else
+                     np.empty((0, *image_rgb.shape[:2]), dtype=np.uint8),
+        }
         if 0 in masks.shape:
             return False
 

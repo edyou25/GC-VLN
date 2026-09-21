@@ -118,6 +118,12 @@ bash run_eval.sh rxr
 
 ## Code Structure
 
+HDF5 debug logging is enabled by default, with one file per episode and RGB-D
+snapshots for every low-level action. See [HDF5 debug logs](docs/hdf5_debug_logs.md)
+for the schema, reading examples, and configuration.
+Use `python scripts/view_hdf5_log.py <episode.h5>` to browse frames with a
+Matplotlib slider, playback controls, RGB-D views, maps, and navigation graphs.
+
 ```
 GC-VLN/
 ├── src/
@@ -151,4 +157,3 @@ Check out our scene graph-based zero-shot navigation series:
       year={2025}
 }
 ```
-

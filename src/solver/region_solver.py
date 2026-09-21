@@ -37,6 +37,8 @@ class Region_Solver():
         self.random_radius = cfg.RS.RANDOM_RADIUS
         self.exp_threshold_one_stage = cfg.RS.EXP_THRESHOLD_ONE_STAGE
         self.dataset = dataset.lower()
+        self.debug_enabled = cfg.DEBUG_LOG.ENABLED
+        self.debug_candidates = []
 
     def update_info(self, instruction_dag: nx.DiGraph, end_stage):
         '''update instruction for each episode
@@ -509,8 +511,12 @@ class Region_Solver():
         return points
     
     def spatial_optimize(self, points, cluster_ids, min_spacing, device, stage):
-        """optimization of spatial distribution
-        """
+        """Optimization of spatial distribution."""
+        if self.debug_enabled:
+            self.debug_candidates.append({
+                'stage': stage, 'points': points.detach().clone(),
+                'cluster_ids': cluster_ids.detach().clone(),
+            })
         # select the points according to the cluster id
         centroids = []
         unique_ids = torch.unique(cluster_ids)
@@ -753,6 +759,7 @@ class Region_Solver():
         ):
         '''get the next point in each turn
         '''
+        self.debug_candidates = []
         # update the begin point
         if self.navigation_tree.bp_flag == 0:
             if thin_type == 0:
