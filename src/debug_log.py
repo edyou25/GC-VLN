@@ -107,12 +107,37 @@ def constraint_parameters(value):
     return value
 
 
+def scene_graph_snapshot(graph, objects, resolution, map_size):
+    """Add sparse BEV footprints to the log without changing the live graph.
+
+    Object point clouds use the same first two coordinates as Map.update_node.
+    Retain occupied grid cells, not a large duplicate of the 3D point cloud.
+    """
+    snapshot = graph.copy()
+    for node in snapshot:
+        if not isinstance(node, (int, np.integer)) or not 0 <= node < len(objects):
+            continue
+        cloud = objects[node].get('pcd')
+        if cloud is None:
+            continue
+        points = np.asarray(cloud.points)
+        if points.ndim != 2 or points.shape[1] < 2:
+            continue
+        xy = points[:, :2]
+        xy = xy[np.isfinite(xy).all(axis=1)] * resolution + map_size / 2
+        xy = xy[((xy >= 0) & (xy < map_size)).all(axis=1)]
+        cells = np.unique(np.floor(xy).astype(np.int32), axis=0)
+        snapshot.nodes[node]['bev_cells'] = cells
+    return snapshot
+
+
 def planning_snapshot(solver, stage_before, stage_result, selected_point):
     tree = solver.navigation_tree
     return {
         'stage_before': stage_before, 'stage': solver.stage,
         'stage_result': stage_result,
         'constraints': constraint_parameters(solver.constraints),
+        'navigation_constraint': constraint_parameters(getattr(solver, 'debug_navigation_constraint', None)),
         'waypoints': solver.debug_candidates,
         'selected_point': selected_point, 'best_point': solver.best_point,
         'navigation_mode': solver.navigation_mode,

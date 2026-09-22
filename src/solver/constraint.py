@@ -68,6 +68,8 @@ class Constraint():
         Return:               
         the mask of the constraint stroed in self.mask
         """ 
+        # Small scalar needed to reproduce sector orientation in debug viewers.
+        self.draw_angle_agent = angle_agent
         y, x = torch.meshgrid(
             torch.arange(shape[1], device=self.device),
             torch.arange(shape[0], device=self.device),

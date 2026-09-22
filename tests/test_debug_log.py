@@ -13,7 +13,7 @@ import h5py
 import networkx as nx
 import numpy as np
 
-from src.debug_log import EpisodeLog, MotionLog, write_value, planning_snapshot
+from src.debug_log import EpisodeLog, MotionLog, write_value, planning_snapshot, scene_graph_snapshot
 
 
 def observation():
@@ -225,6 +225,7 @@ class PolicyIntegrationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             namespace = dict(np=np, os=os, json=json, traceback=traceback, EpisodeLog=EpisodeLog,
                 planning_snapshot=planning_snapshot,
+                scene_graph_snapshot=scene_graph_snapshot,
                 get_instruction_graphs=lambda obs: ([1]*3, [nx.DiGraph() for _ in obs], [[]]*3, []),
                 get_pose_matrix=lambda obs: np.eye(4),
                 rgbs_to_panorama=lambda obs: [obs['rgb'], obs['depth']],
@@ -276,7 +277,7 @@ class PolicyIntegrationTests(unittest.TestCase):
             for i in range(3):
                 map_draft = SimpleNamespace(**{k: np.full((4, 4), i, dtype=np.int32)
                     for k in ('bev_map', 'bev_map_fmm', 'bev_wall', 'bev_thin')}, scene_graph=nx.Graph())
-                agent.sg_list.append(SimpleNamespace(map_draft=map_draft,
+                agent.sg_list.append(SimpleNamespace(map_draft=map_draft, objects=[],
                     get_scenegraph=lambda *args: False, last_room_detection=None,
                     last_detection={'boxes': np.empty((0, 4)), 'labels': np.array([], dtype=str),
                                     'masks': np.empty((0, 2, 3)), 'scores': np.empty(0)}))

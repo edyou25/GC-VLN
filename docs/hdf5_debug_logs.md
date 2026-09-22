@@ -42,6 +42,7 @@ steps/000000/
   scene_graph/{nodes, edges, attributes}
   planning/
     stage_before, stage, stage_result, constraints, waypoints
+    navigation_constraint
     selected_point, best_point, navigation_mode
     navigation_tree/{navigation_tree, waypoints_tree, path, stage_begin}
   action/{act, next_point, current_pos, current_heading, location}
@@ -153,16 +154,17 @@ python scripts/view_hdf5_log.py /path/to/episode_123_xxx.h5
 | 左右键 / Previous、Next | 上一帧、下一帧 |
 | 上下键 / Previous step、Next step | 跳到前后 Step 的首帧 |
 | 空格 / Play / Pause | 播放、暂停，默认每秒 5 帧 |
-| V / Camera + | 轮换查看 RGB-D 的各个相机视角 |
+| O / Objects 复选框 | 显示或隐藏物体投影 |
+| C / RS constraints 复选框 | 显示或隐藏 RS 约束 |
 | Home / End | 第一帧、最后一帧 |
 | I / Inspect HDF5 | 打开数据查看窗口，输入 HDF5 绝对路径并按 Enter |
 
-上方始终显示**所属 Step 开始时**的 RGB 和 Depth，检测面板显示同一观测的
-全景图、Boxes、Labels、Scores 和 Masks。拖动同一 Step 内的 Frame 时，图像保持不变，
-只更新动作、位姿、地图上的当前位置与轨迹；切换 Step 或相机视角时才重新读取图像。
-其余面板展示四张地图、Scene Graph、Navigation Tree、指令 DAG 和世界坐标轨迹/GT。
+上方显示**所属 Step 开始时**的检测 RGB 全景图和 Depth 全景图，检测包含
+Boxes、Labels、Scores 和 Masks。拖动同一 Step 内的 Frame 时，图像保持不变，
+只更新动作、位姿、地图上的当前位置与轨迹；切换 Step 时才重新读取图像。
+其余面板展示 BEV/Wall/Thin 合成图、FMM/GT、Scene Graph、Navigation Tree 和指令 DAG。
 地图青色点和线表示由当前世界位姿与 Episode 起始位姿计算出的当前位置与朝向；
-FMM 上叠加橙色路点和红色选中点。读取旧版日志时也支持原有的有效区域 overlay。
+FMM 上叠加路点和选中点。读取旧版日志时也支持原有的有效区域 overlay。
 路点非常密集时，每次聚类结果最多抽样 3000 个点用于显示，HDF5 原数据不变。
 
 Frame 索引从 0 开始，包含 `start`、`action`、`teleport`、`stuck` 事件。
@@ -196,3 +198,30 @@ python scripts/view_hdf5_log.py episode.h5 --frame 120 --save outputs/frame_120.
 
 图像按 Step 和相机视角缓存；检测、地图和图结构只在切换 Step 时更新。
 启动时只索引小型元数据与轨迹，不会把 Episode 的全部 RGB-D / Masks 读入内存。
+
+### BEV 物体形状与 RS 约束
+
+当前查看器在 BEV 合成图与 FMM 图上叠加物体投影和当前 Step 的 RS 约束，
+右上角复选框及快捷键 `O` / `C` 分别控制 Objects / RS constraints。
+
+- 不同物体 ID 使用不同颜色；同一 ID 跨 Step 保持颜色一致，并标注 `ID: caption`。
+  新日志在 `scene_graph/nodes/.../attributes/bev_cells` 保存物体点云的稀疏占据格点，
+  坐标为 `[row, column]`。显示的是实际点云在 BEV 上的投影；代码没有原始三角 mesh。
+  这里只增加二维去重格点，不保存完整点云或逐 Frame 几何。
+- 旧日志只有 `scope` 时，显示虚线包围范围并标注 `[bounds]`；只有中心时标注 `[center]`。
+  这些近似显示不代表恢复出了物体表面。
+- RS 图层显示 `stage_before` 的关系约束：near/pass 等为圆环，direction/through/weave
+  为对应扇区。颜色与关联的物体一致；新增的导航方向约束用紫色显示。
+  标签显示约束目标与关系，中心、半径、角度直接来自日志。
+- 新日志在约束参数中增加标量 `draw_angle_agent`，记录实际调用 `draw_mask` 时的朝向，
+  并单独保存 `planning/navigation_constraint` 的几何参数；仍不保存规划中间 mask。
+  旧日志缺朝向时，从 stage 起点和 DAG 尝试推算并标注 `[approx]`；无法推算则计为
+  `unavailable`。圆环及 through/weave 的固定几何无需该推算。
+- 圆环/扇区表示 **RS 几何约束**。障碍物连通性、安全距离和 Thin Map 还会进一步过滤，
+  因此它们不是最终可行区域。页面顶部也会显示此区别及当前绘制数量。
+
+运行命令不变，例如：
+
+```bash
+python scripts/view_hdf5_log.py outputs/episode_22_8d8b82a02a55.h5 --frame 15
+```

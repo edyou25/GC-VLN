@@ -337,6 +337,11 @@ class Region_Solver():
             dataset=self.dataset
         )
         nav_mask = nav_constraint.draw_mask(shape, angle_agent, oc_map)
+        if self.debug_enabled:
+            self.debug_navigation_constraint = {
+                key: value for key, value in vars(nav_constraint).items()
+                if key not in ('mask', 'device')
+            }
 
         if self.thin_or_not:
             valid_mask = nav_mask & bev.to(torch.bool)
@@ -759,6 +764,7 @@ class Region_Solver():
         '''
         self.debug_candidates = []
         # update the begin point
+        self.debug_navigation_constraint = None
         if self.navigation_tree.bp_flag == 0:
             if thin_type == 0:
                 self.navigation_tree.update_begin_point(

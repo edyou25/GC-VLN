@@ -141,18 +141,16 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(reader.panorama(0).shape, (12, 84, 3))
         np.testing.assert_array_equal(reader.local_pose(0)[0], [3, 4])
 
-    def test_slider_keyboard_playback_and_sensor_switch(self):
+    def test_slider_keyboard_playback_and_fixed_panorama(self):
         viewer = EpisodeViewer(self.reader)
         self.addCleanup(viewer.close)
+        panorama = viewer.detect_ax.images[0].get_array().copy()
         viewer.slider.set_val(2)
         self.assertEqual(viewer.index, 2)
-        self.assertIn('teleport', viewer.heading.get_text())
-        self.assertEqual(viewer.rgb_ax.images[0].get_array()[0, 0, 0], 50)
-        self.assertIn('Step 000000', viewer.rgb_ax.get_title())
+        self.assertIn('Frame 2/', viewer.heading_text.get_text())
+        np.testing.assert_array_equal(viewer.detect_ax.images[0].get_array(), panorama)
         x, y = viewer.map_markers[0][0].get_data()
         self.assertEqual((x[0], y[0]), (22, 8))
-        viewer.cycle_view()
-        self.assertEqual(viewer.rgb_ax.images[0].get_array()[0, 0, 0], 100)
         viewer.jump_step(1)
         self.assertEqual(viewer.index, 3)
         viewer.jump_step(-1)
@@ -163,7 +161,7 @@ class ViewerTests(unittest.TestCase):
         viewer.seek(4)
         viewer.tick()
         self.assertFalse(viewer.playing)
-        self.assertIn('planner failed', viewer.status.get_text())
+        self.assertEqual(viewer.step_name, '000002')
         self.assertEqual(len(viewer.map_markers), 0)
         viewer.seek(0)
         x, y = viewer.map_markers[0][0].get_data()
@@ -182,8 +180,8 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(viewer.index, 3)
         canvas.callbacks.process('key_press_event', KeyEvent('key_press_event', canvas, key='left'))
         self.assertEqual(viewer.index, 2)
-        canvas.callbacks.process('key_press_event', KeyEvent('key_press_event', canvas, key='v'))
-        self.assertEqual(viewer.view_index, 1)
+        canvas.callbacks.process('key_press_event', KeyEvent('key_press_event', canvas, key='o'))
+        self.assertFalse(viewer.layer_controls.get_status()[0])
 
     def test_headless_export_and_missing_modules(self):
         viewer = EpisodeViewer(self.reader, frame=4)
@@ -218,7 +216,7 @@ class ViewerTests(unittest.TestCase):
             viewer = EpisodeViewer(reader)
             self.assertFalse(viewer.slider.active)
             viewer.seek(20)
-            viewer.cycle_view()
+            viewer.layer_controls.set_active(0)
             viewer.close()
             plt.close(viewer.fig)
 

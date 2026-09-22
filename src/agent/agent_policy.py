@@ -13,7 +13,7 @@ import tqdm
 
 from src.solver.instruction_graph import get_instruction_graphs
 from src.solver.region_solver import Region_Solver
-from src.debug_log import EpisodeLog, planning_snapshot
+from src.debug_log import EpisodeLog, planning_snapshot, scene_graph_snapshot
 from habitat import logger
 from src.habitat_extensions import Simulator
 from src.agent.panorama_utils import rgbs_to_panorama, rotate_180
@@ -289,7 +289,10 @@ class Agent():
                             perception={'detections': sg.last_detection,
                                         'rooms': sg.last_room_detection, 'detected': sg_result},
                             mapping={'bev': bev, 'wall': bev_wall, 'thin': bev_thin, 'fmm': bev_fmm},
-                            scene_graph=scene_graph)
+                            scene_graph=scene_graph_snapshot(
+                                scene_graph, sg.objects,
+                                self.config.POLICY_CONFIG.MAP.RESOLUTION,
+                                self.config.POLICY_CONFIG.MAP.SIZE))
                     stage_before = self.rs_list[not_done_index[i]].stage
 
                     # the location of the agent will adapt to bev in the function

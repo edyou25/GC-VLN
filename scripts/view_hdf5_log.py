@@ -21,11 +21,28 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.debug_log_reader import EpisodeReader, mapping_item, read_value
+from src.bev_overlays import constraint_sector, legacy_constraint_angle
 
 
 def get(group, path, default=None):
     value = read_value(group.get(path)) if group is not None else None
     return default if value is None else value
+
+
+def read_constraint_parameters(node):
+    """Read old and new constraint groups without materializing legacy masks."""
+    if not isinstance(node, h5py.Group):
+        return read_value(node)
+    kind = node.attrs.get('type', 'dict')
+    if kind == 'none':
+        return None
+    if kind in ('list', 'tuple'):
+        return [read_constraint_parameters(node[key]) for key in sorted(node)]
+    if kind == 'mapping':
+        return {read_value(entry['key']): read_constraint_parameters(entry['value'])
+                for entry in node.values()}
+    return {key: read_constraint_parameters(value) for key, value in node.items()
+            if key not in ('mask', 'device')}
 
 
 def missing(ax, message='Not recorded'):
@@ -93,7 +110,7 @@ def stitch_panorama(step, sensor):
 class EpisodeViewer:
     def __init__(self, reader, frame=0, fps=5, depth_max=10, map_padding=.18, map_min_size=80):
         import matplotlib.pyplot as plt
-        from matplotlib.widgets import Button, Slider
+        from matplotlib.widgets import Button, Slider, CheckButtons
 
         self.plt = plt
         self.reader = reader
@@ -111,6 +128,10 @@ class EpisodeViewer:
         self._map_xy_cache = []
         self._gt_map_cache = {}
         self.closed = False
+        self.object_colors = {}
+        self.object_artists = []
+        self.constraint_artists = []
+        self.overlay_bounds = []
 
         # Two full-width panorama rows; 2 maps in one row; 3 graphs in one row.
         # GT reference path is drawn on FMM, no separate 2D trajectory panel.
@@ -133,6 +154,11 @@ class EpisodeViewer:
 
         self.heading_text = self.fig.text(.03, .965, '', fontsize=12, weight='bold')
         self.instruction_text = self.fig.text(.03, .942, '', va='top', fontsize=9)
+        self.overlay_status = self.fig.text(.03, .895, '', fontsize=8)
+        self.layer_controls = CheckButtons(
+            self.fig.add_axes([.80, .948, .18, .048]), ['Objects [O]', 'RS constraints [C]'],
+            [True, True])
+        self.layer_controls.on_clicked(self.toggle_layers)
         self.slider = Slider(
             self.fig.add_axes([.13, .071, .77, .018]), 'Frame', 0,
             max(1, len(reader.frames) - 1), valinit=0, valstep=1, valfmt='%d',
@@ -225,11 +251,141 @@ class EpisodeViewer:
             'down': lambda: self.jump_step(-1),
             ' ': self.toggle_play,
             'i': self.inspect,
+            'o': lambda: self.layer_controls.set_active(0),
+            'c': lambda: self.layer_controls.set_active(1),
             'home': lambda: self.seek(0),
             'end': lambda: self.seek(len(self.reader.frames) - 1),
         }
         if event.key in actions:
             actions[event.key]()
+
+    def toggle_layers(self, label=None):
+        objects, constraints = self.layer_controls.get_status()
+        for artist in self.object_artists:
+            artist.set_visible(objects)
+        for artist in self.constraint_artists:
+            artist.set_visible(constraints)
+        self.fig.canvas.draw_idle()
+
+    def object_color(self, node):
+        if node not in self.object_colors:
+            index = len(self.object_colors)
+            if index < 20:
+                color = matplotlib.colormaps['tab20'](index)
+            else:
+                color = matplotlib.colors.hsv_to_rgb([(index*.61803398875) % 1, .65, .95])
+            self.object_colors[node] = color
+        return self.object_colors[node]
+
+    def draw_objects(self, step):
+        """Colored projected occupancy; old logs use explicitly labeled bounds."""
+        from matplotlib.patches import Rectangle
+        self.object_artists = []
+        graph = get(step, 'scene_graph')
+        footprints = bounds_count = 0
+        if graph is None:
+            return footprints, bounds_count
+        for node, attrs in graph.nodes(data=True):
+            color = self.object_color(node)
+            cells = np.asarray(attrs.get('bev_cells', []))
+            center = attrs.get('center')
+            scope = np.asarray(attrs.get('scope', []))
+            has_cells = cells.ndim == 2 and cells.shape[1] == 2 and len(cells) > 0
+            has_scope = scope.shape == (2, 2) and np.isfinite(scope).all()
+            if has_cells:
+                cells = cells[np.isfinite(cells).all(axis=1)].astype(int)
+                if not len(cells):
+                    continue
+                low, high = cells.min(axis=0), cells.max(axis=0)
+                # Bounding-box raster only, not an HxW image for every object.
+                rgba = np.zeros((high[0]-low[0]+1, high[1]-low[1]+1, 4), dtype=np.float32)
+                local = cells-low
+                rgba[local[:, 0], local[:, 1], :3] = color[:3]
+                rgba[local[:, 0], local[:, 1], 3] = .7
+                extent = (low[1]-.5, high[1]+.5, high[0]+.5, low[0]-.5)
+                center = (low+high)/2 if center is None else center
+                footprints += 1
+            elif has_scope:
+                low, high = scope.min(axis=0), scope.max(axis=0)
+                center = (low+high)/2 if center is None else center
+                bounds_count += 1
+            if center is None or not np.isfinite(center).all():
+                continue
+            if has_cells or has_scope:
+                self.overlay_bounds.extend([(low[1], low[0]), (high[1], high[0])])
+            suffix = '' if has_cells else (' [bounds]' if has_scope else ' [center]')
+            for ax in self.map_axes:
+                if not ax.images:
+                    continue
+                if has_cells:
+                    artist = ax.imshow(rgba, origin='upper', extent=extent,
+                                       interpolation='nearest', zorder=3)
+                    self.object_artists.append(artist)
+                elif has_scope:
+                    artist = Rectangle((low[1], low[0]), high[1]-low[1], high[0]-low[0],
+                                       facecolor=(*color[:3], .15), edgecolor=color,
+                                       linestyle='--', linewidth=1.2, zorder=3)
+                    ax.add_patch(artist)
+                    self.object_artists.append(artist)
+                marker, = ax.plot(center[1], center[0], '.', color=color, zorder=5)
+                label = ax.text(center[1], center[0], f'{node}: {attrs.get("caption", "object")}{suffix}',
+                                fontsize=6, color=color, zorder=7,
+                                bbox={'facecolor': 'black', 'alpha': .5, 'pad': 1})
+                self.object_artists.extend([marker, label])
+        return footprints, bounds_count
+
+    def draw_constraints(self, step):
+        """Draw active-stage RS geometry, distinct from the final feasible mask."""
+        from matplotlib.patches import Wedge
+        self.constraint_artists = []
+        stage = get(step, 'planning/stage_before', get(step, 'planning/stage'))
+        groups = read_constraint_parameters(mapping_item(step.get('planning/constraints'), stage)) or {}
+        planning = {'navigation_tree': {'stage_begin': get(step, 'planning/navigation_tree/stage_begin', {})},
+                    'navigation_mode': get(step, 'planning/navigation_mode', '')}
+        dag = get(self.reader.file, 'episode/dag')
+        entries = []
+        nav = get(step, 'planning/navigation_constraint')
+        if nav:
+            entries.append(('navigation', nav, 'magenta', None))
+        for target, group in groups.items():
+            if not isinstance(group, dict):
+                continue
+            for i, parameters in enumerate(group.get('constraint', [])):
+                if parameters is None:
+                    continue
+                nodes = group.get('nodes', [])
+                node = nodes[i] if i < len(nodes) else target
+                label = f'{target}: {group.get("relation", parameters.get("type", ""))}'
+                angle = legacy_constraint_angle(parameters, stage, planning, dag) if stage is not None else None
+                entries.append((label, parameters, self.object_color(node), angle))
+        count = approximate = skipped = 0
+        for label, parameters, color, angle in entries:
+            sector = constraint_sector(parameters, angle)
+            if sector is None:
+                skipped += 1
+                continue
+            count += 1
+            approximate += int(sector['approximate'])
+            row, col = sector['center']
+            radius = sector['outer']
+            self.overlay_bounds.extend([(col-radius, row-radius), (col+radius, row+radius)])
+            for ax in self.map_axes:
+                if not ax.images:
+                    continue
+                patch = Wedge((col, row), sector['outer'], sector['theta1'], sector['theta2'],
+                              width=sector['outer']-sector['inner'],
+                              facecolor=matplotlib.colors.to_rgba(color, .10),
+                              edgecolor=color, linewidth=1.3,
+                              linestyle='--' if sector['approximate'] else '-', zorder=4)
+                ax.add_patch(patch)
+                angle_mid = np.radians((sector['theta1']+sector['theta2'])/2)
+                radius = (sector['inner']+sector['outer'])/2
+                text = ax.text(col+radius*np.cos(angle_mid), row+radius*np.sin(angle_mid),
+                               label + (' [approx]' if sector['approximate'] else ''),
+                               fontsize=6, color=color, zorder=7,
+                               bbox={'facecolor': 'black', 'alpha': .55, 'pad': 1})
+                self.constraint_artists.extend([patch, text])
+        return count, approximate, skipped
 
     def draw_graph(self, ax, graph, name, spatial=True):
         if graph is None or not len(graph):
@@ -464,6 +620,7 @@ class EpisodeViewer:
         """Overlay Wall/Thin on BEV; show projected GT on the separate FMM map."""
         self.map_markers = []
         self.map_trails = []
+        self.overlay_bounds = []
         bounds = self.map_crop_bounds(step)
         self.map_base_bounds = bounds
         bev = get(step, 'mapping/bev')
@@ -550,6 +707,25 @@ class EpisodeViewer:
                     ax.set_aspect('equal', adjustable='box')
             print(f'Map ROI: col [{xmin:.0f}, {xmax:.0f}], '
                   f'row [{ymin:.0f}, {ymax:.0f}]', flush=True)
+
+        footprints, boxes = self.draw_objects(step)
+        constraints, approximate, skipped = self.draw_constraints(step)
+        if bounds is not None and self.overlay_bounds:
+            xmin, xmax, ymin, ymax = bounds
+            xy = np.asarray(self.overlay_bounds + [(xmin, ymin), (xmax, ymax)])
+            low, high = xy.min(axis=0), xy.max(axis=0)
+            center = (low+high)/2
+            half = max(high-low)*.525
+            self.map_base_bounds = (center[0]-half, center[0]+half, center[1]-half, center[1]+half)
+            for ax in self.map_axes:
+                if ax.images:
+                    ax.set_xlim(center[0]+half, center[0]-half)
+                    ax.set_ylim(center[1]+half, center[1]-half)
+        self.overlay_status.set_text(
+            f'Objects: {footprints} footprints, {boxes} legacy bounds | RS stage '
+            f'{get(step, "planning/stage_before", "—")}: {constraints} sectors '
+            f'({approximate} approximate, {skipped} unavailable) — geometry before obstacle/clearance filtering')
+        self.toggle_layers()
 
     def map_path_prefix(self, index, map_size, resolution):
         """Map-space (col,row) trail through frame index, using logged GPS.
